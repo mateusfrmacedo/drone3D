@@ -1,3 +1,5 @@
+<img width="1024" height="1024" alt="Drone3D-iOS-Default-1024@1x" src="https://github.com/user-attachments/assets/ec3abfa8-a164-4526-80f3-5f1360bb9a27" />
+
 # Drone3D
 
 App nativo para macOS que cria arquivos USDZ usando `RealityKit.PhotogrammetrySession`.
