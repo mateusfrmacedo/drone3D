@@ -13,7 +13,7 @@
 
 ## Build the Intel app
 
-On an Intel Mac, build the engine first:
+On an Intel Mac, build the engine first. The script installs the required Homebrew build tools (`pkgconf`, Autoconf, Automake, and Libtool) and then builds the engine:
 
 ```sh
 ./Scripts/build-intel-engine.sh /absolute/path/to/IntelEngine

@@ -23,13 +23,17 @@ VCPKG_DIRECTORY="$WORK_DIRECTORY/vcpkg"
 TRIPLET="x64-osx"
 
 print "Downloading the reproducible Intel build dependencies…"
+if ! command -v brew >/dev/null; then
+    print "Homebrew is required. Install it from https://brew.sh and run this script again."
+    exit 1
+fi
+brew install pkgconf autoconf autoconf-archive automake libtool
 git clone --depth 1 https://github.com/microsoft/vcpkg.git "$VCPKG_DIRECTORY"
 "$VCPKG_DIRECTORY/bootstrap-vcpkg.sh" -disableMetrics
 
 print "Building COLMAP and OpenMVS for Intel. This can take a long time."
 "$VCPKG_DIRECTORY/vcpkg" install \
     --triplet "$TRIPLET" \
-    --x-no-default-features \
     colmap \
     "openmvs[tools]"
 
