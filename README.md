@@ -7,8 +7,11 @@ Licensed under [AGPL-3.0-or-later](LICENSE).
 ## Features
 
 - Choose the source photo folder and USDZ save location.
+- Import a drone video and automatically select 60–240 of its sharpest frames in capture order.
 - Supports compatible JPEG, PNG, HEIC/HEIF, and TIFF images.
 - Select Preview, Reduced, Medium, or Full reconstruction quality.
+- Architectural mode uses high-sensitivity feature detection and sequential sample ordering for an ordered drone capture.
+- Photo Check flags unreadable, low-resolution, low-detail, or severely under/over-exposed photographs before processing.
 - Shows processing progress, the current stage, elapsed time, estimated remaining time, and errors.
 - Keeps generated textures from the input photographs.
 
@@ -39,12 +42,13 @@ swift run Drone3D
 
 ## Using the App
 
-1. Select the folder containing the photographs.
-2. Select where the resulting `.usdz` file should be saved.
-3. Choose a reconstruction quality.
-4. Click **Start** and wait for processing to finish.
+1. Select a folder containing photographs, or choose **Import Video…** to create a temporary, ordered set of the sharpest video frames.
+2. Review **Photo Check** if the app finds potential issues. It is advisory and never removes photos automatically.
+3. Select where the resulting `.usdz` file should be saved.
+4. Choose a reconstruction quality. Keep **Architectural mode** on when the images are in their original, sequential drone-capture order; turn it off for a mixed or unordered photo set.
+5. Click **Start** and wait for processing to finish.
 
-For the best results, use sharp, evenly lit photographs with clear overlap between consecutive images.
+For the best results, use sharp, evenly lit original photographs with clear overlap between consecutive images. Original still photos are normally higher-resolution and less compressed than video frames, so they remain the best source for maximum mesh and texture quality. Video import is a convenient alternative when a dedicated photo set is unavailable. Architectural mode improves feature matching; it does not alter the mesh to force walls or roofs into artificial planes.
 
 ## Notes
 

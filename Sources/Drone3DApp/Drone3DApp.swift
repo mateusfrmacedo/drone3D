@@ -1,5 +1,8 @@
 import AppKit
+import AVFoundation
+import CoreGraphics
 import Foundation
+import ImageIO
 import ModelIO
 import RealityKit
 import SwiftUI
@@ -31,7 +34,8 @@ struct ContentView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .padding(18)
+        .padding(.horizontal, 18)
+        .padding(.vertical, 10)
         .alert("Drone 3D", isPresented: $model.showingAlert) {
             Button("OK", role: .cancel) { }
         } message: {
@@ -40,7 +44,7 @@ struct ContentView: View {
     }
 
     private var dashboard: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 10) {
             header
             folderCard
             saveCard
@@ -60,27 +64,48 @@ struct ContentView: View {
     }
 
     private var folderCard: some View {
-        LiquidGlassCard(title: "1  PHOTO FOLDER", symbol: "photo.stack") {
+        LiquidGlassCard(title: "1  PHOTOS OR DRONE VIDEO", symbol: "photo.stack") {
             HStack(spacing: 16) {
                 VStack(alignment: .leading, spacing: 5) {
-                    Text(model.inputFolder?.lastPathComponent ?? "No photo folder selected")
+                    Text(model.sourceTitle)
                         .font(.headline)
                         .lineLimit(1)
                         .truncationMode(.middle)
-                    Text(model.inputFolder?.path ?? "Choose a folder to begin.")
+                    Text(model.sourcePath)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
-                    if model.inputFolder != nil {
-                        Label("\(model.photoCount) compatible photos", systemImage: "checkmark.circle")
+                    if model.inputFolder != nil || model.isImportingVideo {
+                        Label(model.sourceCountLabel, systemImage: "checkmark.circle")
                             .font(.caption)
                             .foregroundStyle(model.photoCount == 0 ? .orange : .secondary)
+                        if model.isImportingVideo {
+                            Label("Selecting the sharpest video frames…", systemImage: "video")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        } else if model.isInspectingPhotos {
+                            Label("Checking photo quality…", systemImage: "magnifyingglass")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        } else if let inspection = model.photoInspection {
+                            Label(inspection.summary, systemImage: inspection.hasWarnings ? "exclamationmark.triangle" : "checkmark.seal")
+                                .font(.caption)
+                                .foregroundStyle(inspection.hasWarnings ? .orange : .secondary)
+                        }
                     }
                 }
                 Spacer(minLength: 8)
-                LiquidGlassButton("Choose Folder…", action: model.chooseInputFolder)
-                    .disabled(model.isRunning)
+                VStack(alignment: .trailing, spacing: 6) {
+                    if model.photoInspection?.hasWarnings == true {
+                        LiquidGlassButton("Photo Check", action: model.showPhotoCheck)
+                            .disabled(model.isRunning || model.isInspectingPhotos || model.isImportingVideo)
+                    }
+                    LiquidGlassButton("Import Video…", action: model.chooseDroneVideo)
+                        .disabled(model.isRunning || model.isImportingVideo)
+                    LiquidGlassButton("Choose Folder…", action: model.chooseInputFolder)
+                        .disabled(model.isRunning || model.isImportingVideo)
+                }
             }
         }
     }
@@ -107,15 +132,29 @@ struct ContentView: View {
     }
 
     private var qualityCard: some View {
-        LiquidGlassCard(title: "3  QUALITY", symbol: "slider.horizontal.3") {
-            Picker("Quality", selection: $model.quality) {
-                ForEach(ReconstructionQuality.allCases) { quality in
-                    Text(quality.title).tag(quality)
+        LiquidGlassCard(title: "3  QUALITY & CAPTURE", symbol: "slider.horizontal.3") {
+            VStack(alignment: .leading, spacing: 10) {
+                Picker("Quality", selection: $model.quality) {
+                    ForEach(ReconstructionQuality.allCases) { quality in
+                        Text(quality.title).tag(quality)
+                    }
                 }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .disabled(model.isRunning)
+
+                Toggle(isOn: $model.architecturalMode) {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("Architectural mode")
+                            .font(.subheadline.weight(.medium))
+                        Text("High-detail feature detection for ordered drone captures")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .toggleStyle(.switch)
+                .disabled(model.isRunning)
             }
-            .labelsHidden()
-            .pickerStyle(.segmented)
-            .disabled(model.isRunning)
         }
     }
 
@@ -184,7 +223,7 @@ private struct LiquidGlassCard<Content: View>: View {
             content()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(14)
+        .padding(11)
         .liquidGlass(in: .rect(cornerRadius: 20))
     }
 }
@@ -279,9 +318,14 @@ enum ReconstructionQuality: String, CaseIterable, Identifiable {
 @MainActor
 final class ReconstructionModel: ObservableObject {
     @Published var inputFolder: URL?
+    @Published var selectedVideoURL: URL?
     @Published var outputURL: URL?
     @Published var quality: ReconstructionQuality = .full
+    @Published var architecturalMode = true
     @Published var photoCount = 0
+    @Published var photoInspection: PhotoInspection?
+    @Published var isInspectingPhotos = false
+    @Published var isImportingVideo = false
     @Published var progress = 0.0
     @Published var status = "Waiting for a photo folder"
     @Published var stage = "—"
@@ -299,10 +343,42 @@ final class ReconstructionModel: ObservableObject {
     private var timer: Timer?
     private var startedAt: Date?
     private var temporaryOutputURL: URL?
+    private var checkpointDirectory: URL?
+    private var videoFrameDirectory: URL?
     private let supportedExtensions: Set<String> = ["jpg", "jpeg", "png", "heic", "heif", "tif", "tiff"]
 
+    deinit {
+        if let videoFrameDirectory {
+            try? FileManager.default.removeItem(at: videoFrameDirectory)
+        }
+    }
+
     var canStart: Bool {
-        inputFolder != nil && photoCount > 0 && !isRunning
+        inputFolder != nil && photoCount > 0 && !isRunning && !isInspectingPhotos && !isImportingVideo
+    }
+
+    var sourceTitle: String {
+        if let selectedVideoURL {
+            return selectedVideoURL.lastPathComponent
+        }
+        return inputFolder?.lastPathComponent ?? "No photo folder or video selected"
+    }
+
+    var sourcePath: String {
+        if let selectedVideoURL {
+            return selectedVideoURL.path
+        }
+        return inputFolder?.path ?? "Choose photos or import a drone video to begin."
+    }
+
+    var sourceCountLabel: String {
+        if isImportingVideo {
+            return "Preparing video import"
+        }
+        if selectedVideoURL != nil {
+            return "\(photoCount) sharp frames selected"
+        }
+        return "\(photoCount) compatible photos"
     }
 
     func chooseInputFolder() {
@@ -314,13 +390,89 @@ final class ReconstructionModel: ObservableObject {
         panel.allowsMultipleSelection = false
 
         guard panel.runModal() == .OK, let folder = panel.url else { return }
+        discardVideoFrames()
+        selectedVideoURL = nil
         inputFolder = folder
         outputURL = defaultOutputURL(for: folder)
         photoCount = countCompatiblePhotos(in: folder)
+        photoInspection = nil
+        isInspectingPhotos = photoCount > 0
         completedOutput = nil
         errorMessage = nil
         status = photoCount > 0 ? "Ready to start" : "No compatible photos found"
         stage = "—"
+
+        guard photoCount > 0 else { return }
+        inspectPhotos(in: folder)
+    }
+
+    func chooseDroneVideo() {
+        let panel = NSOpenPanel()
+        panel.title = "Import Drone Video"
+        panel.message = "Drone 3D will select the sharpest frames in capture order."
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.movie]
+
+        guard panel.runModal() == .OK, let videoURL = panel.url else { return }
+        discardVideoFrames()
+        selectedVideoURL = videoURL
+        inputFolder = nil
+        outputURL = defaultOutputURL(forVideo: videoURL)
+        photoCount = 0
+        photoInspection = nil
+        isInspectingPhotos = false
+        isImportingVideo = true
+        completedOutput = nil
+        errorMessage = nil
+        progress = 0
+        status = "Analyzing drone video"
+        stage = "Selecting sharp frames"
+
+        let frameDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Drone3D-VideoFrames-\(UUID().uuidString)", isDirectory: true)
+        videoFrameDirectory = frameDirectory
+
+        Task.detached(priority: .userInitiated) { [weak self] in
+            do {
+                let count = try await VideoFrameExtractor.extract(
+                    from: videoURL,
+                    to: frameDirectory
+                ) { progress in
+                    Task { @MainActor in
+                        guard self?.selectedVideoURL == videoURL else { return }
+                        self?.progress = progress
+                    }
+                }
+                await MainActor.run {
+                    guard self?.selectedVideoURL == videoURL else {
+                        try? FileManager.default.removeItem(at: frameDirectory)
+                        return
+                    }
+                    self?.inputFolder = frameDirectory
+                    self?.photoCount = count
+                    self?.isImportingVideo = false
+                    self?.progress = 0
+                    self?.status = count > 0 ? "Video frames are ready" : "No usable frames were found"
+                    self?.stage = count > 0 ? "Video imported" : "Video import failed"
+                    if count > 0 {
+                        self?.isInspectingPhotos = true
+                        self?.inspectPhotos(in: frameDirectory)
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    guard self?.selectedVideoURL == videoURL else { return }
+                    try? FileManager.default.removeItem(at: frameDirectory)
+                    self?.videoFrameDirectory = nil
+                    self?.isImportingVideo = false
+                    self?.status = "Video import failed"
+                    self?.stage = "Error"
+                    self?.errorMessage = error.localizedDescription
+                }
+            }
+        }
     }
 
     func chooseOutputFile() {
@@ -375,12 +527,13 @@ final class ReconstructionModel: ObservableObject {
     }
 
     private func startRealityKitReconstruction(inputFolder: URL, destination: URL, temporaryDestination: URL) {
-        status = "Starting RealityKit session"
+        status = architecturalMode ? "Starting RealityKit architectural session" : "Starting RealityKit session"
         stage = "Preparing"
         processingTask = Task { [weak self] in
             guard let self else { return }
             do {
-                let session = try PhotogrammetrySession(input: inputFolder)
+                let configuration = try self.makeRealityKitConfiguration(near: temporaryDestination)
+                let session = try PhotogrammetrySession(input: inputFolder, configuration: configuration)
                 self.session = session
                 let request = PhotogrammetrySession.Request.modelFile(url: temporaryDestination, detail: self.quality.detail)
                 try session.process(requests: [request])
@@ -451,6 +604,16 @@ final class ReconstructionModel: ObservableObject {
     func revealOutput() {
         guard let completedOutput else { return }
         NSWorkspace.shared.activateFileViewerSelecting([completedOutput])
+    }
+
+    func showPhotoCheck() {
+        guard let inspection = photoInspection else { return }
+        let alert = NSAlert()
+        alert.messageText = "Photo Check"
+        alert.informativeText = inspection.report
+        alert.alertStyle = inspection.hasWarnings ? .warning : .informational
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
     }
 
     private func handle(_ output: PhotogrammetrySession.Output, destination: URL) {
@@ -535,6 +698,10 @@ final class ReconstructionModel: ObservableObject {
             try? FileManager.default.removeItem(at: temporaryOutputURL)
         }
         temporaryOutputURL = nil
+        if let checkpointDirectory {
+            try? FileManager.default.removeItem(at: checkpointDirectory)
+        }
+        checkpointDirectory = nil
     }
 
     private func startTimer() {
@@ -563,10 +730,52 @@ final class ReconstructionModel: ObservableObject {
         }
     }
 
+    private func inspectPhotos(in folder: URL) {
+        let supportedExtensions = supportedExtensions
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let inspection = PhotoInspector.inspect(in: folder, supportedExtensions: supportedExtensions)
+            await MainActor.run {
+                guard self?.inputFolder == folder else { return }
+                self?.photoInspection = inspection
+                self?.isInspectingPhotos = false
+            }
+        }
+    }
+
+    private func makeRealityKitConfiguration(near temporaryDestination: URL) throws -> PhotogrammetrySession.Configuration {
+        var configuration = PhotogrammetrySession.Configuration()
+        let checkpoints = temporaryDestination.deletingLastPathComponent()
+            .appendingPathComponent(".drone3d-checkpoints-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: checkpoints, withIntermediateDirectories: true)
+        checkpointDirectory = checkpoints
+        configuration.checkpointDirectory = checkpoints
+
+        if architecturalMode {
+            configuration.featureSensitivity = .high
+            configuration.sampleOrdering = .sequential
+        }
+        return configuration
+    }
+
     private func defaultOutputURL(for folder: URL) -> URL {
         let safeName = folder.lastPathComponent
             .replacingOccurrences(of: " ", with: "_")
         return folder.appendingPathComponent("\(safeName)_3D").appendingPathExtension("usdz")
+    }
+
+    private func defaultOutputURL(forVideo videoURL: URL) -> URL {
+        let safeName = videoURL.deletingPathExtension().lastPathComponent
+            .replacingOccurrences(of: " ", with: "_")
+        return videoURL.deletingLastPathComponent()
+            .appendingPathComponent("\(safeName)_3D")
+            .appendingPathExtension("usdz")
+    }
+
+    private func discardVideoFrames() {
+        if let videoFrameDirectory {
+            try? FileManager.default.removeItem(at: videoFrameDirectory)
+        }
+        videoFrameDirectory = nil
     }
 
     private func temporaryURL(near destination: URL) -> URL {
@@ -605,6 +814,346 @@ final class ReconstructionModel: ObservableObject {
     private func format(seconds: TimeInterval) -> String {
         let wholeSeconds = max(0, Int(seconds.rounded()))
         return String(format: "%02d:%02d:%02d", wholeSeconds / 3600, (wholeSeconds % 3600) / 60, wholeSeconds % 60)
+    }
+}
+
+struct PhotoInspection: Sendable {
+    let inspectedCount: Int
+    let unreadableFiles: [String]
+    let lowResolutionFiles: [String]
+    let lowDetailFiles: [String]
+    let exposureFiles: [String]
+
+    var hasWarnings: Bool {
+        !unreadableFiles.isEmpty || !lowResolutionFiles.isEmpty || !lowDetailFiles.isEmpty || !exposureFiles.isEmpty
+    }
+
+    var summary: String {
+        guard hasWarnings else { return "Photo Check: no obvious quality issues" }
+        return "Photo Check: \(warningCount) potential issue\(warningCount == 1 ? "" : "s") found"
+    }
+
+    var report: String {
+        var sections = ["Inspected \(inspectedCount) compatible photo\(inspectedCount == 1 ? "" : "s")."]
+        if !unreadableFiles.isEmpty {
+            sections.append(list("Could not read", files: unreadableFiles, advice: "Remove or replace these files before processing."))
+        }
+        if !lowResolutionFiles.isEmpty {
+            sections.append(list("Low resolution", files: lowResolutionFiles, advice: "Use the original camera files when possible."))
+        }
+        if !lowDetailFiles.isEmpty {
+            sections.append(list("Possible blur or low surface detail", files: lowDetailFiles, advice: "Check focus and use overlapping, angled photos of flat walls and corners."))
+        }
+        if !exposureFiles.isEmpty {
+            sections.append(list("Possible clipped exposure", files: exposureFiles, advice: "Avoid very dark shadows and blown highlights where possible."))
+        }
+        if !hasWarnings {
+            sections.append("No obvious resolution, detail, or exposure issues were detected. This check cannot verify photo overlap or complete scene coverage.")
+        }
+        return sections.joined(separator: "\n\n")
+    }
+
+    private var warningCount: Int {
+        unreadableFiles.count + lowResolutionFiles.count + lowDetailFiles.count + exposureFiles.count
+    }
+
+    private func list(_ title: String, files: [String], advice: String) -> String {
+        let preview = files.prefix(8).joined(separator: "\n• ")
+        let more = files.count > 8 ? "\n• and \(files.count - 8) more" : ""
+        return "\(title) (\(files.count))\n• \(preview)\(more)\n\(advice)"
+    }
+}
+
+private enum PhotoInspector {
+    private struct Metrics {
+        let lowDetail: Bool
+        let clippedExposure: Bool
+    }
+
+    static func inspect(in folder: URL, supportedExtensions: Set<String>) -> PhotoInspection {
+        let files = (try? FileManager.default.contentsOfDirectory(
+            at: folder,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        )) ?? []
+        let photos = files.filter {
+            supportedExtensions.contains($0.pathExtension.lowercased()) &&
+                (try? $0.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true
+        }
+
+        var unreadable = [String]()
+        var lowResolution = [String]()
+        var lowDetail = [String]()
+        var exposure = [String]()
+
+        for photo in photos {
+            guard let source = CGImageSourceCreateWithURL(photo as CFURL, nil),
+                  let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+                  let width = properties[kCGImagePropertyPixelWidth] as? Int,
+                  let height = properties[kCGImagePropertyPixelHeight] as? Int,
+                  width > 0,
+                  height > 0 else {
+                unreadable.append(photo.lastPathComponent)
+                continue
+            }
+
+            if width * height < 3_000_000 || min(width, height) < 1_600 {
+                lowResolution.append(photo.lastPathComponent)
+            }
+            guard let metrics = imageMetrics(source: source) else {
+                unreadable.append(photo.lastPathComponent)
+                continue
+            }
+            if metrics.lowDetail {
+                lowDetail.append(photo.lastPathComponent)
+            }
+            if metrics.clippedExposure {
+                exposure.append(photo.lastPathComponent)
+            }
+        }
+
+        return PhotoInspection(
+            inspectedCount: photos.count,
+            unreadableFiles: unreadable,
+            lowResolutionFiles: lowResolution,
+            lowDetailFiles: lowDetail,
+            exposureFiles: exposure
+        )
+    }
+
+    private static func imageMetrics(source: CGImageSource) -> Metrics? {
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: 160,
+            kCGImageSourceShouldCacheImmediately: true
+        ]
+        guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
+
+        let width = image.width
+        let height = image.height
+        guard width > 1, height > 1 else { return nil }
+        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        guard let context = CGContext(
+            data: &pixels,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: width * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+        context.interpolationQuality = .medium
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+
+        var luminance = [Double](repeating: 0, count: width * height)
+        var brightPixels = 0
+        var darkPixels = 0
+        for index in 0..<(width * height) {
+            let offset = index * 4
+            let value = (0.2126 * Double(pixels[offset]) + 0.7152 * Double(pixels[offset + 1]) + 0.0722 * Double(pixels[offset + 2])) / 255
+            luminance[index] = value
+            if value > 0.98 { brightPixels += 1 }
+            if value < 0.02 { darkPixels += 1 }
+        }
+
+        var difference = 0.0
+        var comparisons = 0
+        for y in 0..<height {
+            for x in 0..<width {
+                let index = y * width + x
+                if x + 1 < width {
+                    difference += abs(luminance[index] - luminance[index + 1])
+                    comparisons += 1
+                }
+                if y + 1 < height {
+                    difference += abs(luminance[index] - luminance[index + width])
+                    comparisons += 1
+                }
+            }
+        }
+
+        let averageDifference = difference / Double(max(comparisons, 1))
+        let pixelCount = Double(width * height)
+        return Metrics(
+            lowDetail: averageDifference < 0.018,
+            clippedExposure: Double(brightPixels) / pixelCount > 0.35 || Double(darkPixels) / pixelCount > 0.35
+        )
+    }
+}
+
+private enum VideoFrameExtractor {
+    private struct ScoredFrame {
+        let time: Double
+        let sharpness: Double
+    }
+
+    private enum ExtractionError: LocalizedError {
+        case noVideoTrack
+        case unreadableVideo
+        case noFrames
+        case couldNotWriteFrame
+
+        var errorDescription: String? {
+            switch self {
+            case .noVideoTrack:
+                "The selected file does not contain a readable video track."
+            case .unreadableVideo:
+                "Drone 3D could not read the selected video."
+            case .noFrames:
+                "Drone 3D could not extract any usable video frames."
+            case .couldNotWriteFrame:
+                "Drone 3D could not save the selected video frames."
+            }
+        }
+    }
+
+    static func extract(
+        from videoURL: URL,
+        to destination: URL,
+        progress: @escaping @Sendable (Double) -> Void
+    ) async throws -> Int {
+        let asset = AVURLAsset(url: videoURL)
+        let duration = try await asset.load(.duration)
+        let seconds = duration.seconds
+        guard seconds.isFinite, seconds > 0 else { throw ExtractionError.unreadableVideo }
+        guard let track = try await asset.loadTracks(withMediaType: .video).first else {
+            throw ExtractionError.noVideoTrack
+        }
+
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        progress(0.01)
+        let scores = try scoreFrames(in: asset, track: track, duration: seconds, progress: progress)
+        let targetCount = min(240, max(60, Int((seconds * 2).rounded(.up))))
+        let selectedTimes = selectSharpestTimes(
+            duration: seconds,
+            count: targetCount,
+            scores: scores
+        )
+        guard !selectedTimes.isEmpty else { throw ExtractionError.noFrames }
+
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        generator.requestedTimeToleranceBefore = .zero
+        generator.requestedTimeToleranceAfter = .zero
+
+        var written = 0
+        for (index, time) in selectedTimes.enumerated() {
+            try Task.checkCancellation()
+            let requestTime = CMTime(seconds: time, preferredTimescale: 600)
+            var actualTime = CMTime.zero
+            let image = try generator.copyCGImage(at: requestTime, actualTime: &actualTime)
+            let outputURL = destination.appendingPathComponent(
+                String(format: "frame-%04d.jpg", index + 1)
+            )
+            try writeJPEG(image, to: outputURL)
+            written += 1
+            progress(0.60 + (0.40 * Double(index + 1) / Double(selectedTimes.count)))
+        }
+        guard written > 0 else { throw ExtractionError.noFrames }
+        return written
+    }
+
+    private static func scoreFrames(
+        in asset: AVURLAsset,
+        track: AVAssetTrack,
+        duration: Double,
+        progress: @escaping @Sendable (Double) -> Void
+    ) throws -> [ScoredFrame] {
+        let reader = try AVAssetReader(asset: asset)
+        let output = AVAssetReaderTrackOutput(
+            track: track,
+            outputSettings: [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+            ]
+        )
+        output.alwaysCopiesSampleData = false
+        guard reader.canAdd(output) else { throw ExtractionError.unreadableVideo }
+        reader.add(output)
+        guard reader.startReading() else { throw reader.error ?? ExtractionError.unreadableVideo }
+        defer { reader.cancelReading() }
+
+        var scores = [ScoredFrame]()
+        while let sample = output.copyNextSampleBuffer() {
+            try Task.checkCancellation()
+            guard let pixelBuffer = CMSampleBufferGetImageBuffer(sample) else { continue }
+            let time = CMSampleBufferGetPresentationTimeStamp(sample).seconds
+            guard time.isFinite else { continue }
+            scores.append(ScoredFrame(time: time, sharpness: sharpness(of: pixelBuffer)))
+            progress(min(0.60, max(0.02, 0.60 * time / duration)))
+        }
+        if reader.status == .failed {
+            throw reader.error ?? ExtractionError.unreadableVideo
+        }
+        return scores
+    }
+
+    private static func selectSharpestTimes(
+        duration: Double,
+        count: Int,
+        scores: [ScoredFrame]
+    ) -> [Double] {
+        guard duration > 0, count > 0 else { return [] }
+        let interval = duration / Double(count)
+        var best = [ScoredFrame?](repeating: nil, count: count)
+        for score in scores where score.time >= 0 && score.time < duration {
+            let index = min(count - 1, Int(score.time / interval))
+            if best[index] == nil || score.sharpness > best[index]!.sharpness {
+                best[index] = score
+            }
+        }
+        return best.enumerated().map { index, score in
+            score?.time ?? (Double(index) + 0.5) * interval
+        }
+    }
+
+    private static func sharpness(of pixelBuffer: CVPixelBuffer) -> Double {
+        guard CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly) == kCVReturnSuccess else { return 0 }
+        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
+        guard CVPixelBufferGetPlaneCount(pixelBuffer) > 0,
+              let baseAddress = CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 0) else { return 0 }
+
+        let width = CVPixelBufferGetWidthOfPlane(pixelBuffer, 0)
+        let height = CVPixelBufferGetHeightOfPlane(pixelBuffer, 0)
+        let bytesPerRow = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 0)
+        guard width > 2, height > 2 else { return 0 }
+
+        let luma = baseAddress.assumingMemoryBound(to: UInt8.self)
+        let step = max(1, max(width, height) / 480)
+        var difference = 0
+        var samples = 0
+        var y = step
+        while y < height - step {
+            let row = y * bytesPerRow
+            let nextRow = (y + step) * bytesPerRow
+            var x = step
+            while x < width - step {
+                let current = Int(luma[row + x])
+                difference += abs(Int(luma[row + x + step]) - current)
+                difference += abs(Int(luma[nextRow + x]) - current)
+                samples += 1
+                x += step
+            }
+            y += step
+        }
+        return samples > 0 ? Double(difference) / Double(samples) : 0
+    }
+
+    private static func writeJPEG(_ image: CGImage, to outputURL: URL) throws {
+        guard let destination = CGImageDestinationCreateWithURL(
+            outputURL as CFURL,
+            UTType.jpeg.identifier as CFString,
+            1,
+            nil
+        ) else {
+            throw ExtractionError.couldNotWriteFrame
+        }
+        CGImageDestinationAddImage(destination, image, [
+            kCGImageDestinationLossyCompressionQuality: 0.95
+        ] as CFDictionary)
+        guard CGImageDestinationFinalize(destination) else {
+            throw ExtractionError.couldNotWriteFrame
+        }
     }
 }
 
