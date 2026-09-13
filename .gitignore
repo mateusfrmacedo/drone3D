@@ -1,0 +1,16 @@
+# macOS Finder metadata
+.DS_Store
+
+# Swift Package Manager build products
+.build/
+.swiftpm/
+
+# Locally assembled application bundle
+Drone3D.app/
+
+# Private source photos and generated 3D models
+360 Casa/
+*.usdz
+
+# Xcode local data
+DerivedData/

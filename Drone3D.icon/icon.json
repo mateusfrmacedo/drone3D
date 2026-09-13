@@ -1,0 +1,149 @@
+{
+  "fill" : {
+    "linear-gradient" : [
+      "extended-gray:0.75000,1.00000",
+      "extended-gray:0.50000,1.00000"
+    ],
+    "orientation" : {
+      "start" : {
+        "x" : 0.5,
+        "y" : 1
+      },
+      "stop" : {
+        "x" : 0.5,
+        "y" : 0
+      }
+    }
+  },
+  "groups" : [
+    {
+      "layers" : [
+
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.3
+      }
+    },
+    {
+      "layers" : [
+
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.3
+      }
+    },
+    {
+      "layers" : [
+        {
+          "blend-mode" : "normal",
+          "fill" : {
+            "linear-gradient" : [
+              "display-p3:0.32214,0.65052,1.04736,1.00000",
+              "srgb:0.00000,0.58980,1.00000,1.00000"
+            ],
+            "orientation" : {
+              "start" : {
+                "x" : 0.5,
+                "y" : 0
+              },
+              "stop" : {
+                "x" : 0.7651950687889938,
+                "y" : 1.120346192722372
+              }
+            }
+          },
+          "hidden" : false,
+          "image-name" : "3D.png",
+          "name" : "3D",
+          "position" : {
+            "scale" : 0.3,
+            "translation-in-points" : [
+              0,
+              245
+            ]
+          }
+        },
+        {
+          "fill" : {
+            "linear-gradient" : [
+              "srgb:0.66422,0.66424,0.66423,1.00000",
+              "srgb:1.00000,1.00000,1.00000,1.00000"
+            ],
+            "orientation" : {
+              "start" : {
+                "x" : 0.4610263749969226,
+                "y" : 0.098276084357334
+              },
+              "stop" : {
+                "x" : 0.8110207154579117,
+                "y" : 0.8968361369018357
+              }
+            }
+          },
+          "image-name" : "drone.png",
+          "name" : "drone",
+          "position" : {
+            "scale" : 0.7,
+            "translation-in-points" : [
+              0,
+              0
+            ]
+          }
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.3
+      }
+    },
+    {
+      "layers" : [
+        {
+          "fill" : {
+            "linear-gradient" : [
+              "srgb:0.57415,0.57416,0.57415,1.00000",
+              "extended-srgb:0.00000,0.53333,1.00000,1.00000"
+            ]
+          },
+          "image-name" : "MALHA.png",
+          "name" : "MALHA",
+          "position" : {
+            "scale" : 0.7,
+            "translation-in-points" : [
+              0,
+              100
+            ]
+          }
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.3
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "circles" : [
+      "watchOS"
+    ],
+    "squares" : "shared"
+  }
+}
