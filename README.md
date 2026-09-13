@@ -62,4 +62,6 @@ The Intel edition uses COLMAP and OpenMVS. See [THIRD_PARTY_NOTICES.md](THIRD_PA
 
 <img width="752" height="714" alt="Drone 3D app window" src="https://github.com/user-attachments/assets/531b62fe-0a4b-4036-85f0-e56005f40976" />
 
-<img width="206" height="130" alt="Drone3D" src="https://github.com/user-attachments/assets/cad751f3-b860-4f16-8946-9688b2e34a93" />
+<img width="411" height="259" alt="Gif" src="https://github.com/user-attachments/assets/bbebf3a2-0b84-4ddd-be88-d7b778e64757" />
+
+
