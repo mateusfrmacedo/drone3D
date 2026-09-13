@@ -65,7 +65,8 @@ xcrun actool "$PROJECT_DIRECTORY/Drone3D.icon" \
     --enable-on-demand-resources NO \
     --development-region en \
     --target-device mac \
-    --minimum-deployment-target 14.0 \
+    --minimum-deployment-target 26.0 \
+    --output-partial-info-plist "$BUILD_DIRECTORY/asset-info.plist" \
     --platform macosx >/dev/null
 
 if [[ "$ARCHITECTURE" == "x86_64" ]]; then
