@@ -1,0 +1,10 @@
+SPDX-License-Identifier: AGPL-3.0-or-later
+
+Drone 3D is licensed under the GNU Affero General Public License, version 3
+or any later version, at the option of the copyright holder.
+
+The complete license text is available at:
+https://www.gnu.org/licenses/agpl-3.0.html
+
+Source code for this program, including instructions for building the Intel
+photogrammetry engine, is available in this repository.

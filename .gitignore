@@ -7,6 +7,7 @@
 
 # Locally assembled application bundle
 Drone3D.app/
+Distribution/
 
 # Private source photos and generated 3D models
 360 Casa/

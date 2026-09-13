@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import ModelIO
 import RealityKit
 import SwiftUI
 import UniformTypeIdentifiers
@@ -264,6 +265,15 @@ enum ReconstructionQuality: String, CaseIterable, Identifiable {
         case .full: .full
         }
     }
+
+    var intelImageSize: Int {
+        switch self {
+        case .preview: 1024
+        case .reduced: 1600
+        case .medium: 2400
+        case .full: 3600
+        }
+    }
 }
 
 @MainActor
@@ -284,6 +294,7 @@ final class ReconstructionModel: ObservableObject {
     @Published var alertMessage = ""
 
     private var session: PhotogrammetrySession?
+    private var intelProcessor: IntelPhotogrammetryProcessor?
     private var processingTask: Task<Void, Never>?
     private var timer: Timer?
     private var startedAt: Date?
@@ -332,18 +343,13 @@ final class ReconstructionModel: ObservableObject {
             showAlert("No compatible photos were found in the selected folder.")
             return
         }
-        guard PhotogrammetrySession.isSupported else {
-            showAlert("RealityKit photogrammetry is not supported on this Mac.")
-            return
-        }
-
         let destination = outputURL ?? defaultOutputURL(for: inputFolder)
         outputURL = destination
         guard confirmReplacementIfNeeded(at: destination) else { return }
         let temporaryDestination = temporaryURL(near: destination)
 
         progress = 0
-        status = "Starting RealityKit session"
+        status = "Preparing reconstruction"
         stage = "Preparing"
         remainingText = nil
         errorMessage = nil
@@ -353,6 +359,24 @@ final class ReconstructionModel: ObservableObject {
         temporaryOutputURL = temporaryDestination
         startTimer()
 
+        if PhotogrammetrySession.isSupported {
+            startRealityKitReconstruction(
+                inputFolder: inputFolder,
+                destination: destination,
+                temporaryDestination: temporaryDestination
+            )
+        } else {
+            startIntelReconstruction(
+                inputFolder: inputFolder,
+                destination: destination,
+                temporaryDestination: temporaryDestination
+            )
+        }
+    }
+
+    private func startRealityKitReconstruction(inputFolder: URL, destination: URL, temporaryDestination: URL) {
+        status = "Starting RealityKit session"
+        stage = "Preparing"
         processingTask = Task { [weak self] in
             guard let self else { return }
             do {
@@ -378,10 +402,49 @@ final class ReconstructionModel: ObservableObject {
         }
     }
 
+    private func startIntelReconstruction(inputFolder: URL, destination: URL, temporaryDestination: URL) {
+        status = "Starting Intel reconstruction engine"
+        stage = "Preparing"
+        let processor = IntelPhotogrammetryProcessor()
+        intelProcessor = processor
+
+        processingTask = Task { [weak self, processor] in
+            let quality = self?.quality ?? .full
+            do {
+                try await Task.detached(priority: .userInitiated) {
+                    try processor.reconstruct(
+                        inputFolder: inputFolder,
+                        outputURL: temporaryDestination,
+                        quality: quality
+                    ) { [weak self] update in
+                        Task { @MainActor in
+                            self?.applyIntelUpdate(update)
+                        }
+                    }
+                }.value
+
+                guard let self else { return }
+                if processor.wasCancelled {
+                    self.finishCancelled()
+                } else {
+                    self.finishSuccessfully(at: destination, temporaryURL: temporaryDestination)
+                }
+            } catch {
+                guard let self else { return }
+                if processor.wasCancelled || error is CancellationError {
+                    self.finishCancelled()
+                } else {
+                    self.finishWithError(error)
+                }
+            }
+        }
+    }
+
     func cancel() {
         status = "Cancelling…"
         stage = "Cancelling"
         session?.cancel()
+        intelProcessor?.cancel()
         processingTask?.cancel()
     }
 
@@ -414,6 +477,13 @@ final class ReconstructionModel: ObservableObject {
         default:
             break
         }
+    }
+
+    private func applyIntelUpdate(_ update: IntelPhotogrammetryProcessor.Update) {
+        progress = update.progress
+        status = update.status
+        stage = update.stage
+        remainingText = update.estimatedRemainingTime
     }
 
     private func finishSuccessfully(at url: URL, temporaryURL: URL) {
@@ -459,6 +529,7 @@ final class ReconstructionModel: ObservableObject {
         timer?.invalidate()
         timer = nil
         session = nil
+        intelProcessor = nil
         processingTask = nil
         if let temporaryOutputURL, FileManager.default.fileExists(atPath: temporaryOutputURL.path) {
             try? FileManager.default.removeItem(at: temporaryOutputURL)
@@ -534,5 +605,293 @@ final class ReconstructionModel: ObservableObject {
     private func format(seconds: TimeInterval) -> String {
         let wholeSeconds = max(0, Int(seconds.rounded()))
         return String(format: "%02d:%02d:%02d", wholeSeconds / 3600, (wholeSeconds % 3600) / 60, wholeSeconds % 60)
+    }
+}
+
+/// CPU photogrammetry fallback bundled only with the Intel distribution.
+/// It uses COLMAP for camera registration and OpenMVS for dense geometry and texture baking.
+private final class IntelPhotogrammetryProcessor: @unchecked Sendable {
+    struct Update: Sendable {
+        let progress: Double
+        let status: String
+        let stage: String
+        let estimatedRemainingTime: String?
+    }
+
+    private let lock = NSLock()
+    private var activeProcess: Process?
+    private var cancelled = false
+
+    var wasCancelled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return cancelled
+    }
+
+    func cancel() {
+        lock.lock()
+        cancelled = true
+        let process = activeProcess
+        lock.unlock()
+        process?.terminate()
+    }
+
+    func reconstruct(
+        inputFolder: URL,
+        outputURL: URL,
+        quality: ReconstructionQuality,
+        update: @escaping @Sendable (Update) -> Void
+    ) throws {
+        let engine = try engineDirectory()
+        let workspace = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Drone3D-Intel-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: workspace) }
+
+        let database = workspace.appendingPathComponent("database.db")
+        let sparse = workspace.appendingPathComponent("sparse", isDirectory: true)
+        let dense = workspace.appendingPathComponent("dense", isDirectory: true)
+        let scene = workspace.appendingPathComponent("scene.mvs")
+        let denseScene = workspace.appendingPathComponent("scene_dense.mvs")
+        let meshScene = workspace.appendingPathComponent("scene_mesh.mvs")
+        let refinedScene = workspace.appendingPathComponent("scene_mesh_refined.mvs")
+
+        try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: sparse, withIntermediateDirectories: true)
+
+        try run(
+            engine: engine,
+            tool: "colmap",
+            arguments: [
+                "feature_extractor", "--database_path", database.path,
+                "--image_path", inputFolder.path,
+                "--SiftExtraction.use_gpu", "0"
+            ],
+            update: update,
+            progress: 0.08,
+            stage: "Image features",
+            status: "Analyzing photo features"
+        )
+        try run(
+            engine: engine,
+            tool: "colmap",
+            arguments: [
+                "exhaustive_matcher", "--database_path", database.path,
+                "--SiftMatching.use_gpu", "0"
+            ],
+            update: update,
+            progress: 0.20,
+            stage: "Photo matching",
+            status: "Matching photographs"
+        )
+        try run(
+            engine: engine,
+            tool: "colmap",
+            arguments: [
+                "mapper", "--database_path", database.path,
+                "--image_path", inputFolder.path,
+                "--output_path", sparse.path
+            ],
+            update: update,
+            progress: 0.34,
+            stage: "Camera alignment",
+            status: "Aligning camera positions"
+        )
+
+        let sparseModel = try firstDirectory(in: sparse)
+        try run(
+            engine: engine,
+            tool: "colmap",
+            arguments: [
+                "image_undistorter", "--image_path", inputFolder.path,
+                "--input_path", sparseModel.path,
+                "--output_path", dense.path,
+                "--output_type", "COLMAP",
+                "--max_image_size", String(quality.intelImageSize)
+            ],
+            update: update,
+            progress: 0.45,
+            stage: "Image preparation",
+            status: "Preparing undistorted images"
+        )
+        try run(
+            engine: engine,
+            tool: "InterfaceCOLMAP",
+            arguments: ["-i", dense.path, "-o", scene.path],
+            update: update,
+            progress: 0.52,
+            stage: "Scene import",
+            status: "Preparing the Intel reconstruction"
+        )
+        try run(
+            engine: engine,
+            tool: "DensifyPointCloud",
+            arguments: ["-i", scene.path, "-o", denseScene.path],
+            update: update,
+            progress: 0.68,
+            stage: "Dense reconstruction",
+            status: "Building dense geometry"
+        )
+        try run(
+            engine: engine,
+            tool: "ReconstructMesh",
+            arguments: ["-i", denseScene.path, "-o", meshScene.path],
+            update: update,
+            progress: 0.80,
+            stage: "Mesh generation",
+            status: "Generating the 3D mesh"
+        )
+        try run(
+            engine: engine,
+            tool: "RefineMesh",
+            arguments: ["-i", meshScene.path, "-o", refinedScene.path],
+            update: update,
+            progress: 0.88,
+            stage: "Mesh refinement",
+            status: "Refining the 3D mesh"
+        )
+        try run(
+            engine: engine,
+            tool: "TextureMesh",
+            arguments: ["-i", refinedScene.path, "--export-type", "obj"],
+            update: update,
+            progress: 0.94,
+            stage: "Texture generation",
+            status: "Baking photo textures"
+        )
+
+        let texturedOBJ = try newestOBJ(in: workspace)
+        update(Update(progress: 0.97, status: "Converting textured model to USDZ", stage: "USDZ export", estimatedRemainingTime: nil))
+        let asset = MDLAsset(url: texturedOBJ)
+        try asset.export(to: outputURL)
+        guard FileManager.default.fileExists(atPath: outputURL.path) else {
+            throw ProcessorError.outputNotCreated
+        }
+    }
+
+    private func engineDirectory() throws -> URL {
+        guard let engine = Bundle.main.resourceURL?.appendingPathComponent("IntelEngine/bin", isDirectory: true),
+              FileManager.default.isExecutableFile(atPath: engine.appendingPathComponent("colmap").path),
+              FileManager.default.isExecutableFile(atPath: engine.appendingPathComponent("InterfaceCOLMAP").path),
+              FileManager.default.isExecutableFile(atPath: engine.appendingPathComponent("DensifyPointCloud").path),
+              FileManager.default.isExecutableFile(atPath: engine.appendingPathComponent("ReconstructMesh").path),
+              FileManager.default.isExecutableFile(atPath: engine.appendingPathComponent("RefineMesh").path),
+              FileManager.default.isExecutableFile(atPath: engine.appendingPathComponent("TextureMesh").path)
+        else {
+            throw ProcessorError.engineMissing
+        }
+        return engine
+    }
+
+    private func run(
+        engine: URL,
+        tool: String,
+        arguments: [String],
+        update: @escaping @Sendable (Update) -> Void,
+        progress: Double,
+        stage: String,
+        status: String
+    ) throws {
+        try checkCancellation()
+        update(Update(progress: progress, status: status, stage: stage, estimatedRemainingTime: nil))
+
+        let executable = engine.appendingPathComponent(tool)
+        let process = Process()
+        process.executableURL = executable
+        process.arguments = arguments
+        process.currentDirectoryURL = engine
+        var environment = ProcessInfo.processInfo.environment
+        let libraryDirectory = engine.deletingLastPathComponent().appendingPathComponent("lib").path
+        environment["DYLD_LIBRARY_PATH"] = [libraryDirectory, environment["DYLD_LIBRARY_PATH"]].compactMap { $0 }.joined(separator: ":")
+        process.environment = environment
+
+        let logURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Drone3D-Intel-\(UUID().uuidString).log")
+        FileManager.default.createFile(atPath: logURL.path, contents: nil)
+        let logFile = try FileHandle(forWritingTo: logURL)
+        process.standardOutput = logFile
+        process.standardError = logFile
+        lock.lock()
+        activeProcess = process
+        lock.unlock()
+        defer {
+            lock.lock()
+            activeProcess = nil
+            lock.unlock()
+            try? logFile.close()
+        }
+
+        do {
+            try process.run()
+        } catch {
+            throw ProcessorError.couldNotLaunch(tool)
+        }
+        process.waitUntilExit()
+        if wasCancelled { throw CancellationError() }
+        guard process.terminationStatus == 0 else {
+            try? logFile.close()
+            let data = (try? Data(contentsOf: logURL)) ?? Data()
+            try? FileManager.default.removeItem(at: logURL)
+            let message = String(data: data, encoding: .utf8) ?? "Unknown error"
+            throw ProcessorError.commandFailed(tool, message.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        try? FileManager.default.removeItem(at: logURL)
+    }
+
+    private func checkCancellation() throws {
+        if wasCancelled { throw CancellationError() }
+    }
+
+    private func firstDirectory(in url: URL) throws -> URL {
+        let entries = try FileManager.default.contentsOfDirectory(
+            at: url,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        )
+        if let directory = entries.first(where: { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }) {
+            return directory
+        }
+        throw ProcessorError.noSparseModel
+    }
+
+    private func newestOBJ(in directory: URL) throws -> URL {
+        let enumerator = FileManager.default.enumerator(
+            at: directory,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        )
+        let models = (enumerator?.allObjects as? [URL] ?? []).filter { $0.pathExtension.lowercased() == "obj" }
+        guard let model = models.max(by: {
+            (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast <
+            (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+        }) else {
+            throw ProcessorError.noTexturedModel
+        }
+        return model
+    }
+
+    private enum ProcessorError: LocalizedError {
+        case engineMissing
+        case couldNotLaunch(String)
+        case commandFailed(String, String)
+        case noSparseModel
+        case noTexturedModel
+        case outputNotCreated
+
+        var errorDescription: String? {
+            switch self {
+            case .engineMissing:
+                "The Intel reconstruction engine is missing from this app build. Install the Intel distribution, not the Apple Silicon edition."
+            case .couldNotLaunch(let tool):
+                "Could not launch the Intel tool: \(tool)."
+            case .commandFailed(let tool, let message):
+                "\(tool) failed. \(message)"
+            case .noSparseModel:
+                "The Intel engine could not align enough photographs to create a scene."
+            case .noTexturedModel:
+                "The Intel engine completed without creating a textured mesh."
+            case .outputNotCreated:
+                "The USDZ export did not create an output file."
+            }
+        }
     }
 }
