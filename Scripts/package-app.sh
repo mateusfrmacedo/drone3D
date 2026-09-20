@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if (( $# < 1 || $# > 2 )); then
-    print "Usage: $0 <arm64|x86_64> [output-directory]"
+    print "Usage: $0 arm64 [output-directory]"
     exit 64
 fi
 
@@ -11,11 +11,8 @@ case "$ARCHITECTURE" in
     arm64)
         APP_NAME="Drone3D-AppleSilicon"
         ;;
-    x86_64)
-        APP_NAME="Drone3D-Intel"
-        ;;
     *)
-        print "Architecture must be arm64 or x86_64."
+        print "Drone3D now supports Apple Silicon (arm64) only."
         exit 64
         ;;
 esac
@@ -32,20 +29,11 @@ if [[ -e "$APP_DIRECTORY" ]]; then
     exit 1
 fi
 
-if [[ "$ARCHITECTURE" == "x86_64" ]]; then
-    : "${DRONE3D_INTEL_ENGINE:?Set DRONE3D_INTEL_ENGINE to the directory containing bin/ and lib/.}"
-    for TOOL in colmap InterfaceCOLMAP DensifyPointCloud ReconstructMesh RefineMesh TextureMesh; do
-        if [[ ! -x "$DRONE3D_INTEL_ENGINE/bin/$TOOL" ]]; then
-            print "Missing Intel engine tool: $DRONE3D_INTEL_ENGINE/bin/$TOOL"
-            exit 1
-        fi
-    done
-fi
 
 cd "$PROJECT_DIRECTORY"
 swift build -c release --arch "$ARCHITECTURE"
 
-EXECUTABLE="$PROJECT_DIRECTORY/.build/$ARCHITECTURE-apple-macosx/release/Drone3D"
+EXECUTABLE="$(swift build -c release --arch "$ARCHITECTURE" --show-bin-path)/Drone3D"
 if [[ ! -x "$EXECUTABLE" ]]; then
     print "Swift did not produce the expected executable: $EXECUTABLE"
     exit 1
@@ -69,9 +57,6 @@ xcrun actool "$PROJECT_DIRECTORY/Drone3D.icon" \
     --output-partial-info-plist "$BUILD_DIRECTORY/asset-info.plist" \
     --platform macosx >/dev/null
 
-if [[ "$ARCHITECTURE" == "x86_64" ]]; then
-    ditto "$DRONE3D_INTEL_ENGINE" "$BUILD_DIRECTORY/$APP_NAME.app/Contents/Resources/IntelEngine"
-fi
 
 codesign --force --deep --sign - "$BUILD_DIRECTORY/$APP_NAME.app" >/dev/null
 mkdir -p "$OUTPUT_DIRECTORY"

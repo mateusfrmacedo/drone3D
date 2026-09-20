@@ -11,6 +11,7 @@ let package = Package(
         .executableTarget(
             name: "Drone3DApp",
             path: "Sources/Drone3DApp"
-        )
+        ),
+        .testTarget(name: "Drone3DTests", dependencies: ["Drone3DApp"])
     ]
 )

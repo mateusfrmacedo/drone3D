@@ -1,72 +1,35 @@
 # Drone 3D
 
-Native macOS app that turns a folder of photographs into a textured USDZ 3D model using `RealityKit.PhotogrammetrySession`.
+Native macOS photogrammetry app for Apple Silicon (M1 and later). Turns original photos or drone video into a textured USDZ using RealityKit Object Capture.
 
-Licensed under [AGPL-3.0-or-later](LICENSE).
+## Quality
 
-## Features
+Maximum is the default profile. It requests custom reconstruction with:
+- PNG textures without additional lossy compression.
+- Texture dimensions up to 16384 × 16384 on macOS 15+, or 8192 × 8192 on macOS 14.
+- Up to 1,000,000 polygons.
+- Diffuse color, normal, roughness, displacement and ambient occlusion maps.
+- High feature sensitivity.
 
-- Choose the source photo folder and USDZ save location.
-- Import a drone video and automatically select 60–240 of its sharpest frames in capture order.
-- Supports compatible JPEG, PNG, HEIC/HEIF, and TIFF images.
-- Select Preview, Reduced, Medium, or Full reconstruction quality.
-- Architectural mode uses high-sensitivity feature detection and sequential sample ordering for an ordered drone capture.
-- Photo Check flags unreadable, low-resolution, low-detail, or severely under/over-exposed photographs before processing.
-- Shows processing progress, the current stage, elapsed time, estimated remaining time, and errors.
-- Keeps generated textures from the input photographs.
+These are requested limits, not guaranteed output sizes. RealityKit chooses the actual output according to the input and available resources. Larger maps cannot recover missing image detail. Maximum may take considerably longer and use substantial memory and disk space, especially on an 8 GB M1. Preview, Reduced and Medium remain available.
 
-## Requirements
+Original photographs are passed directly to RealityKit without resizing or recompression. Before importing a video, choose a limit of 240, 480 (default), or 720 frames. Reimport the video after changing this limit. Higher limits use more memory, disk space and processing time; short videos may provide fewer frames. Selection uses sharpness and exposure across the entire capture, saves full-size decoded frames as lossless PNG, and preserves capture order. PNG avoids another compression generation; it does not undo the original video's compression. Empty sampling windows are skipped.
 
-- macOS 14 Sonoma or later.
-- Sufficient free storage and memory for the selected image set. Full quality can require substantial processing time and resources.
+Photo Check reports readability, resolution, low detail and exposure issues. It does not validate overlap or complete scene coverage and never removes source photographs automatically.
 
-## Supported Macs
+Keep Architectural mode enabled for photos in capture order. Disable it for mixed or unordered photo sets. High feature sensitivity applies in either case. For the best textures use original, sharp still photographs with consistent lighting and substantial overlap, including oblique views of walls, corners and roofs.
 
-- **Apple silicon edition:** uses RealityKit Object Capture on Macs that report support for `PhotogrammetrySession`.
-- **Intel edition:** uses the bundled CPU photogrammetry engine (COLMAP and OpenMVS). This edition is slower, but creates a textured mesh and exports it as USDZ without relying on RealityKit Object Capture.
+## Requirements and use
 
-Both editions use the same interface and support the same input photo formats.
-
-## Run from Xcode
-
-1. Open `Package.swift` in Xcode.
-2. Choose the **Drone3D** scheme.
-3. Click Run.
-
-## Build from Terminal
+Apple Silicon Mac with Object Capture support and macOS 14 or later. Choose the input folder or import a video, choose the USDZ destination and quality, then start reconstruction. Intel/CUDA/OpenMVS are no longer part of the app's reconstruction path.
 
 ```sh
 swift build
+swift test
 swift run Drone3D
+./Scripts/package-app.sh arm64 /absolute/path/to/new-output-folder
 ```
 
-## Using the App
+The packaging script refuses to overwrite an existing app. Historical Intel build scripts and third-party notices remain for reference only. Source photos and generated USDZ files are excluded from version control.
 
-1. Select a folder containing photographs, or choose **Import Video…** to create a temporary, ordered set of the sharpest video frames.
-2. Review **Photo Check** if the app finds potential issues. It is advisory and never removes photos automatically.
-3. Select where the resulting `.usdz` file should be saved.
-4. Choose a reconstruction quality. Keep **Architectural mode** on when the images are in their original, sequential drone-capture order; turn it off for a mixed or unordered photo set.
-5. Click **Start** and wait for processing to finish.
-
-For the best results, use sharp, evenly lit original photographs with clear overlap between consecutive images. Original still photos are normally higher-resolution and less compressed than video frames, so they remain the best source for maximum mesh and texture quality. Video import is a convenient alternative when a dedicated photo set is unavailable. Architectural mode improves feature matching; it does not alter the mesh to force walls or roofs into artificial planes.
-
-## Notes
-
-The source photographs and generated USDZ files are intentionally excluded from this repository.
-
-## Distribution builds
-
-The packaging script creates separate Apple silicon and Intel app bundles. See [Scripts/README.md](Scripts/README.md) for the exact commands and Intel engine layout.
-
-## Third-party software
-
-The Intel edition uses COLMAP and OpenMVS. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for licenses and attribution.
-
-## Screenshot
-
-<img width="752" height="714" alt="Drone 3D app window" src="https://github.com/user-attachments/assets/531b62fe-0a4b-4036-85f0-e56005f40976" />
-
-<img width="1350" height="870" alt="Captura de Tela 2026-09-13 às 17 42 56" src="https://github.com/user-attachments/assets/76167e9a-74d7-4040-a1f8-fa5ca91686f6" />
-
-
-
+Licensed under [AGPL-3.0-or-later](LICENSE).
