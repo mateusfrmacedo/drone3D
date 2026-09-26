@@ -9,13 +9,22 @@ final class QualityTests: XCTestCase {
         XCTAssertEqual(ReconstructionQuality.full.detail, .custom)
         let specification = configuration.customDetailSpecification
         XCTAssertEqual(specification.textureFormat, .png)
-        XCTAssertEqual(specification.outputTextureMaps, .all)
-        XCTAssertEqual(specification.maximumPolygonCount, 1_000_000)
+        XCTAssertEqual(specification.outputTextureMaps, .diffuseColor)
+        XCTAssertEqual(specification.maximumPolygonCount, 2_000_000)
         if #available(macOS 15.0, *) {
             XCTAssertEqual(specification.maximumTextureDimension, .sixteenK)
         } else {
             XCTAssertEqual(specification.maximumTextureDimension, .eightK)
         }
+    }
+
+    func testRawUsesNativePresetWithoutCustomBudget() {
+        var configuration = PhotogrammetrySession.Configuration()
+        let original = configuration.customDetailSpecification
+        ReconstructionQuality.raw.configure(&configuration)
+        XCTAssertEqual(ReconstructionQuality.raw.detail, .raw)
+        XCTAssertEqual(configuration.customDetailSpecification, original)
+        XCTAssertEqual(configuration.featureSensitivity, .high)
     }
 
     func testQualityDoesNotForceSequentialOrdering() {

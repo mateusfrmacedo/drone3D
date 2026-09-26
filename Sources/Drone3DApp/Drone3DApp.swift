@@ -12,15 +12,16 @@ struct Drone3DApp: App {
     var body: some SwiftUI.Scene {
         WindowGroup("Drone 3D") {
             ContentView()
-                .frame(width: 640, height: 620)
+                .frame(width: 680, height: 700)
         }
-        .defaultSize(width: 640, height: 620)
+        .defaultSize(width: 680, height: 700)
         .windowResizability(.contentSize)
     }
 }
 
 struct ContentView: View {
     @StateObject private var model = ReconstructionModel()
+    @State private var cropSource: CropSource?
 
     var body: some View {
         Group {
@@ -35,6 +36,9 @@ struct ContentView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .padding(.horizontal, 18)
         .padding(.vertical, 10)
+        .sheet(item: $cropSource) { source in
+            TerrainCropView(source: source.url)
+        }
         .alert("Drone 3D", isPresented: $model.showingAlert) {
             Button("OK", role: .cancel) { }
         } message: {
@@ -50,6 +54,15 @@ struct ContentView: View {
             qualityCard
             processingCard
             actions
+            Button("Crop terrain…") {
+                let panel = NSOpenPanel()
+                panel.title = "Choose a USDZ to crop (original preserved)"
+                panel.allowedContentTypes = [UTType(filenameExtension: "usdz")!]
+                panel.allowsMultipleSelection = false
+                if let output = model.completedOutput { panel.directoryURL = output.deletingLastPathComponent() }
+                if panel.runModal() == .OK, let url = panel.url { cropSource = CropSource(url: url) }
+            }
+            .disabled(model.isRunning || model.isImportingVideo)
         }
     }
 
@@ -156,9 +169,9 @@ struct ContentView: View {
 
                 Toggle(isOn: $model.architecturalMode) {
                     VStack(alignment: .leading, spacing: 1) {
-                        Text("Architectural mode")
+                        Text("Preserve terrain")
                             .font(.subheadline.weight(.medium))
-                        Text("High-detail feature detection for ordered drone captures")
+                        Text("On: keep surroundings, then crop. Off: isolate an object. Ordered drone photos when on.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -191,6 +204,14 @@ struct ContentView: View {
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
+                if let warning = model.warningMessage {
+                    Label(warning, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+                if let summary = model.runReport?.outputSummary {
+                    Text(summary).font(.caption).textSelection(.enabled)
+                }
                 if let error = model.errorMessage {
                     Label(error, systemImage: "exclamationmark.triangle.fill")
                         .font(.caption)
@@ -208,6 +229,9 @@ struct ContentView: View {
                     LiquidGlassButton("Show in Finder", action: model.revealOutput)
                 }
                 Spacer()
+                if model.runReport != nil && !model.isRunning {
+                    LiquidGlassButton("Run Report", action: model.showRunReport)
+                }
             }
             if model.isRunning {
                 LiquidGlassButton("Cancel", role: .destructive, action: model.cancel)
@@ -294,7 +318,7 @@ private extension View {
 }
 
 enum ReconstructionQuality: String, CaseIterable, Identifiable {
-    case preview, reduced, medium, full
+    case preview, reduced, medium, full, raw
 
     var id: String { rawValue }
 
@@ -303,7 +327,8 @@ enum ReconstructionQuality: String, CaseIterable, Identifiable {
         case .preview: "Preview"
         case .reduced: "Reduced"
         case .medium: "Medium"
-        case .full: "Maximum"
+        case .full: "Reference"
+        case .raw: "Raw"
         }
     }
 
@@ -313,28 +338,32 @@ enum ReconstructionQuality: String, CaseIterable, Identifiable {
         case .reduced: .reduced
         case .medium: .medium
         case .full: .custom
+        case .raw: .raw
         }
     }
 
     var textureDescription: String {
+        if self == .raw {
+            return "Native Raw: detailed mesh + multiple color maps • Very high memory use; may be too heavy for AR"
+        }
         guard self == .full else { return "Use original photos for the sharpest textures." }
         if #available(macOS 15.0, *) {
-            return "Up to 16K lossless textures • High memory and disk usage"
+            return "Antenna reference: up to 2M polygons + 16K PNG color • Output sizes are not guaranteed"
         }
-        return "Up to 8K lossless textures • High memory and disk usage"
+        return "Antenna reference: up to 2M polygons + 8K PNG color • Output sizes are not guaranteed"
     }
 
     func configure(_ configuration: inout PhotogrammetrySession.Configuration) {
         configuration.featureSensitivity = .high
         guard self == .full else { return }
         var detail = PhotogrammetrySession.Configuration.CustomDetailSpecification()
-        detail.maximumPolygonCount = 1_000_000
+        detail.maximumPolygonCount = 2_000_000
         detail.maximumTextureDimension = .eightK
         if #available(macOS 15.0, *) {
             detail.maximumTextureDimension = .sixteenK
         }
         detail.textureFormat = .png
-        detail.outputTextureMaps = .all
+        detail.outputTextureMaps = .diffuseColor
         configuration.customDetailSpecification = detail
     }
 
@@ -358,6 +387,8 @@ final class ReconstructionModel: ObservableObject {
     @Published var elapsedText = "00:00:00"
     @Published var remainingText: String?
     @Published var errorMessage: String?
+    @Published var warningMessage: String?
+    @Published var runReport: ReconstructionReport?
     @Published var isRunning = false
     @Published var completedOutput: URL?
     @Published var showingAlert = false
@@ -525,6 +556,14 @@ final class ReconstructionModel: ObservableObject {
         let destination = outputURL ?? defaultOutputURL(for: inputFolder)
         outputURL = destination
         guard confirmReplacementIfNeeded(at: destination) else { return }
+        if quality == .raw {
+            let alert = NSAlert()
+            alert.messageText = "Raw reconstruction"
+            alert.informativeText = "Raw can create very large meshes and multiple color textures. It may exceed available memory on a 16 GB Mac and produce a USDZ too heavy for AR. Use Reference for a bounded polygon budget. Continue?"
+            alert.addButton(withTitle: "Continue")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
         let temporaryDestination = temporaryURL(near: destination)
 
         progress = 0
@@ -532,6 +571,8 @@ final class ReconstructionModel: ObservableObject {
         stage = "Preparing"
         remainingText = nil
         errorMessage = nil
+        warningMessage = nil
+        runReport = nil
         completedOutput = nil
         isRunning = true
         startedAt = .now
@@ -558,6 +599,7 @@ final class ReconstructionModel: ObservableObject {
             guard let self else { return }
             do {
                 let configuration = try self.makeRealityKitConfiguration(near: temporaryDestination)
+                self.runReport = ReconstructionReport(quality: self.quality, configuration: configuration, inputCount: self.photoCount)
                 let session = try PhotogrammetrySession(input: inputFolder, configuration: configuration)
                 self.session = session
                 let request = PhotogrammetrySession.Request.modelFile(url: temporaryDestination, detail: self.quality.detail)
@@ -565,6 +607,10 @@ final class ReconstructionModel: ObservableObject {
 
                 for try await output in session.outputs {
                     self.handle(output, destination: destination)
+                    if case .requestError(_, let error) = output {
+                        self.finishWithError(error)
+                        return
+                    }
                     if case .processingComplete = output {
                         self.finishSuccessfully(at: destination, temporaryURL: temporaryDestination)
                         return
@@ -594,6 +640,24 @@ final class ReconstructionModel: ObservableObject {
         NSWorkspace.shared.activateFileViewerSelecting([completedOutput])
     }
 
+    func showRunReport() {
+        guard let runReport else { return }
+        let panel = NSSavePanel()
+        panel.title = "Save reconstruction report"
+        panel.nameFieldStringValue = "Drone3D-report.json"
+        panel.allowedContentTypes = [.json]
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try runReport.encoded().write(to: url, options: .atomic)
+        } catch {
+            showAlert("Could not save report: \(error.localizedDescription)")
+        }
+    }
+
+    private func refreshWarnings() {
+        warningMessage = runReport?.warningSummary
+    }
+
     func showPhotoCheck() {
         guard let inspection = photoInspection else { return }
         let alert = NSAlert()
@@ -620,10 +684,14 @@ final class ReconstructionModel: ObservableObject {
             errorMessage = error.localizedDescription
             status = "The request encountered an error"
         case .invalidSample(let id, let reason):
-            errorMessage = "Invalid photo skipped (\(id)): \(reason)"
+            runReport?.invalidSamples[id] = reason
+            refreshWarnings()
         case .skippedSample(let id):
-            errorMessage = "A photo was skipped by RealityKit (id \(id))."
+            runReport?.skippedSampleIDs.insert(id)
+            refreshWarnings()
         case .automaticDownsampling:
+            runReport?.automaticDownsampling = true
+            refreshWarnings()
             status = "Automatically reducing resolution"
         default:
             break
@@ -651,10 +719,19 @@ final class ReconstructionModel: ObservableObject {
         stage = "Completed"
         remainingText = nil
         completedOutput = url
+        runReport?.outcome = "completed"
+        runReport?.elapsedSeconds = startedAt.map { Date().timeIntervalSince($0) }
+        do {
+            runReport?.textures = try USDZTextureInspector.inspect(url)
+        } catch {
+            runReport?.inspectionNote = error.localizedDescription
+        }
+        refreshWarnings()
         endProcessing()
     }
 
     private func finishCancelled() {
+        runReport?.outcome = "cancelled"
         status = "Processing cancelled"
         stage = "Cancelled"
         remainingText = nil
@@ -662,6 +739,8 @@ final class ReconstructionModel: ObservableObject {
     }
 
     private func finishWithError(_ error: Error) {
+        runReport?.outcome = "failed"
+        runReport?.failure = error.localizedDescription
         status = "Processing stopped"
         stage = "Error"
         errorMessage = error.localizedDescription
@@ -732,10 +811,7 @@ final class ReconstructionModel: ObservableObject {
         configuration.checkpointDirectory = checkpoints
         quality.configure(&configuration)
 
-        if architecturalMode {
-            configuration.featureSensitivity = .high
-            configuration.sampleOrdering = .sequential
-        }
+        CaptureScope.configure(&configuration, preserveTerrain: architecturalMode)
         return configuration
     }
 
